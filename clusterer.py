@@ -9,7 +9,8 @@ from haversine import haversine, Unit
 class HierarchicalClusterer:
     """
     Performs hierarchical clustering: measurement -> water body -> location
-    Now handles site deduplication and accepts different clustering radii for different water body types.
+    Handles site-measurement combinations so that a site can belong to different clusters
+    for different measurement types.
     """
     
     def __init__(self,
@@ -37,45 +38,47 @@ class HierarchicalClusterer:
         """Calculate haversine distance between two coordinates."""
         return haversine((coord1[0], coord1[1]), (coord2[0], coord2[1]), unit=Unit.KILOMETERS)
     
-    def _create_unique_sites(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _create_unique_site_measurements(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Create a dataframe of unique sites based on site_id, latitude, and longitude.
+        Create a dataframe of unique site-measurement combinations.
+        Each site can have multiple rows if it has different measurement types.
         
         Returns:
-        - DataFrame with one row per unique site
+        - DataFrame with one row per unique site-measurement combination
         """
-        # Drop duplicates based on site_id, latitude, and longitude
-        unique_sites = df[[self.site_id_col, self.lat_col, self.lon_col, 
-                          self.measurement_col, self.water_body_col]].drop_duplicates(
-            subset=[self.site_id_col, self.lat_col, self.lon_col]
+        # Drop duplicates based on site_id, lat, lon AND measurement type
+        unique_combinations = df[[self.site_id_col, self.lat_col, self.lon_col, 
+                                 self.measurement_col, self.water_body_col]].drop_duplicates(
+            subset=[self.site_id_col, self.lat_col, self.lon_col, self.measurement_col]
         ).copy()
         
-        print(f"Reduced {len(df)} observations to {len(unique_sites)} unique sites")
-        return unique_sites
+        print(f"Reduced {len(df)} observations to {len(unique_combinations)} unique site-measurement combinations")
+        return unique_combinations
     
     def _merge_clusters_back(self, original_df: pd.DataFrame, clustered_sites: pd.DataFrame) -> pd.DataFrame:
         """
         Merge cluster assignments back to the original dataframe.
+        Now merges on site_id, lat, lon, AND measurement type.
         
         Parameters:
         - original_df: Original dataframe with all observations
-        - clustered_sites: Dataframe with unique sites and their cluster assignments
+        - clustered_sites: Dataframe with unique site-measurement combinations and their cluster assignments
         
         Returns:
         - Original dataframe with cluster assignments
         """
-        # Create a mapping dataframe with only the columns needed for merging
+        # Create a mapping dataframe with columns needed for merging
         cluster_mapping = clustered_sites[[self.site_id_col, self.lat_col, self.lon_col, 
-                                         'cluster_id', 'cluster_type_id']].copy()
+                                         self.measurement_col, 'cluster_id', 'cluster_type_id']].copy()
         
-        # Merge back to original dataframe
+        # Merge back to original dataframe on site_id, lat, lon, AND measurement type
         result_df = original_df.merge(
             cluster_mapping,
-            on=[self.site_id_col, self.lat_col, self.lon_col],
+            on=[self.site_id_col, self.lat_col, self.lon_col, self.measurement_col],
             how='left'
         )
         
-        # Fill any missing values (shouldn't happen if data is clean)
+        # Fill any missing values
         result_df['cluster_id'] = result_df['cluster_id'].fillna(-1).astype(int)
         result_df['cluster_type_id'] = result_df['cluster_type_id'].fillna('noise')
         
@@ -216,6 +219,7 @@ class HierarchicalClusterer:
     def cluster(self, df: pd.DataFrame, eps_km: float = None, eps_dict: Dict[str, float] = None, output_dir: str = None) -> pd.DataFrame:
         """
         Main clustering method that orchestrates the entire process.
+        Now handles site-measurement combinations properly.
         
         Parameters:
         - df: DataFrame to cluster
@@ -244,16 +248,16 @@ class HierarchicalClusterer:
             for water_body, radius in eps_dict.items():
                 print(f"  - {water_body}: {radius}km")
         
-        # Step 1: Create unique sites dataframe
-        unique_sites = self._create_unique_sites(df)
+        # Step 1: Create unique site-measurement combinations dataframe
+        unique_site_measurements = self._create_unique_site_measurements(df)
         
-        # Initialize result dataframe for unique sites
-        result_sites = unique_sites.copy()
+        # Initialize result dataframe for unique site-measurement combinations
+        result_sites = unique_site_measurements.copy()
         result_sites['cluster_id'] = -1
         result_sites['cluster_type_id'] = 'noise'
         
         # Split by measurement
-        measurement_dfs = self.split_by_measurement(unique_sites)
+        measurement_dfs = self.split_by_measurement(unique_site_measurements)
         
         # Process each measurement type
         for measurement, measurement_df in measurement_dfs.items():
@@ -274,7 +278,7 @@ class HierarchicalClusterer:
                     df=water_body_df,
                     measurement=measurement,
                     water_body=water_body,
-                    eps_km=current_eps,  # Use the specific eps for this water body
+                    eps_km=current_eps,
                     cluster_id_start=cluster_id_start,
                     output_dir=output_dir
                 )
@@ -298,40 +302,44 @@ class HierarchicalClusterer:
         """Print clustering summary statistics."""
         print("\nClustering complete!")
         
-        # Get unique sites for accurate counts
-        unique_sites = df.drop_duplicates(subset=[self.site_id_col, self.lat_col, self.lon_col])
+        # Get unique site-measurement combinations for accurate counts
+        unique_combinations = df.drop_duplicates(
+            subset=[self.site_id_col, self.lat_col, self.lon_col, self.measurement_col]
+        )
         
-        print(f"Total clusters: {unique_sites[unique_sites['cluster_id'] >= 0]['cluster_id'].nunique()}")
-        print(f"Total noise points: {(unique_sites['cluster_id'] == -1).sum()}")
+        print(f"Total clusters: {unique_combinations[unique_combinations['cluster_id'] >= 0]['cluster_id'].nunique()}")
+        print(f"Total noise points: {(unique_combinations['cluster_id'] == -1).sum()}")
         
-        # Group by summary - now counting unique sites, not all observations
-        cluster_summary = unique_sites.groupby([self.measurement_col, self.water_body_col]).agg({
+        # Group by summary - now counting unique site-measurement combinations
+        cluster_summary = unique_combinations.groupby([self.measurement_col, self.water_body_col]).agg({
             'cluster_id': lambda x: len(set(x) - {-1}),  # Count unique cluster IDs (excluding -1)
-            self.site_id_col: 'count'  # Count unique sites
+            self.site_id_col: 'count'  # Count unique site-measurement combinations
         }).reset_index()
-        cluster_summary.columns = ['measurement', 'water_body', 'n_clusters', 'n_sites']
+        cluster_summary.columns = ['measurement', 'water_body', 'n_clusters', 'n_site_measurement_combinations']
         
         print("\nSummary by measurement and water body:")
         print(cluster_summary)
     
     def get_site_level_stats(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Get statistics at the site level (not observation level).
+        Get statistics at the site-measurement level.
         
         Parameters:
         - df: DataFrame with cluster assignments
         
         Returns:
-        - DataFrame with site-level statistics
+        - DataFrame with site-measurement level statistics
         """
-        # Get unique sites first
-        unique_sites = df.drop_duplicates(subset=[self.site_id_col, self.lat_col, self.lon_col])
+        # Get unique site-measurement combinations first
+        unique_combinations = df.drop_duplicates(
+            subset=[self.site_id_col, self.lat_col, self.lon_col, self.measurement_col]
+        )
         
-        stats = unique_sites[unique_sites['cluster_id'] >= 0].groupby('cluster_type_id').agg({
+        stats = unique_combinations[unique_combinations['cluster_id'] >= 0].groupby('cluster_type_id').agg({
             self.site_id_col: 'count',
             self.lat_col: ['mean', 'std'],
             self.lon_col: ['mean', 'std']
         }).reset_index()
         
-        stats.columns = ['cluster_type_id', 'site_count', 'lat_mean', 'lat_std', 'lon_mean', 'lon_std']
+        stats.columns = ['cluster_type_id', 'site_measurement_count', 'lat_mean', 'lat_std', 'lon_mean', 'lon_std']
         return stats
