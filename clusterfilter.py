@@ -199,3 +199,58 @@ class ClusterFilter:
             results.append(cluster_stats)
         
         return pd.DataFrame(results)
+    
+######################################################## Function used to filter based on results from IQR and CV ######################################################################
+
+def filter_clusters_with_rules(cluster_stats, 
+                             min_obs=5, 
+                             min_robust_cv=0.05, 
+                             max_robust_cv=1.7):
+    """
+    Filter clusters based on simple, sensible rules.
+    
+    Parameters:
+    - cluster_stats: DataFrame with cluster statistics
+    - min_obs: Minimum number of observations required
+    - min_robust_cv: Minimum robust CV (to exclude zero-variance clusters)
+    - max_robust_cv: Maximum robust CV (to exclude extreme variability)
+    
+    Returns:
+    - valid_clusters: Clusters that meet the criteria
+    - excluded_clusters: Clusters that don't meet the criteria
+    """
+    # Apply filtering rules
+    valid_mask = (
+        (cluster_stats['n_obs'] >= min_obs) &
+        (cluster_stats['robust_cv'] >= min_robust_cv) &
+        (cluster_stats['robust_cv'] <= max_robust_cv) &
+        (cluster_stats['robust_cv'].notna())  # Ensure robust_cv is not NaN
+    )
+    
+    valid_clusters = cluster_stats[valid_mask].copy()
+    excluded_clusters = cluster_stats[~valid_mask].copy()
+    
+    # Add exclusion reasons
+    excluded_clusters['exclusion_reason'] = ''
+    excluded_clusters.loc[excluded_clusters['n_obs'] < min_obs, 'exclusion_reason'] += 'too_few_obs; '
+    excluded_clusters.loc[excluded_clusters['robust_cv'] < min_robust_cv, 'exclusion_reason'] += 'too_low_variability; '
+    excluded_clusters.loc[excluded_clusters['robust_cv'] > max_robust_cv, 'exclusion_reason'] += 'too_high_variability; '
+    excluded_clusters.loc[excluded_clusters['robust_cv'].isna(), 'exclusion_reason'] += 'missing_robust_cv; '
+    
+    # Print summary
+    print(f"Total clusters: {len(cluster_stats)}")
+    print(f"Valid clusters: {len(valid_clusters)}")
+    print(f"Excluded clusters: {len(excluded_clusters)}")
+    
+    # Break down by measurement type
+    print("\nValid clusters by measurement type:")
+    for mtype in valid_clusters['measurement_type'].unique():
+        count = len(valid_clusters[valid_clusters['measurement_type'] == mtype])
+        print(f"  {mtype}: {count}")
+    
+    print("\nExclusion reasons:")
+    for reason in ['too_few_obs', 'too_low_variability', 'too_high_variability', 'missing_robust_cv']:
+        count = excluded_clusters['exclusion_reason'].str.contains(reason).sum()
+        print(f"  {reason}: {count}")
+    
+    return valid_clusters, excluded_clusters
